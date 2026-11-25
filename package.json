@@ -1,0 +1,11 @@
+{
+  "name": "menu-platform-spec",
+  "private": true,
+  "description": "Builds the Menu Platform Design review page from MENU_PLATFORM_DESIGN.md",
+  "scripts": {
+    "build-page": "node review-page/build_page.cjs MENU_PLATFORM_DESIGN.md review-page/menu-platform-design.html"
+  },
+  "devDependencies": {
+    "markdown-it": "^14.1.0"
+  }
+}
