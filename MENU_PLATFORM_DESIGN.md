@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | **Proposed — awaiting approval.** No build work starts until this is approved. |
-| **Version** | 2.2 · 2026-11-25 |
+| **Version** | 2.3 · 2026-11-25 |
 | **Owner** | Eric Melgaard |
 | **Scope** | Three connected systems behind Operator Hub menus: the **product database** (what an item is), the **ETL server** (every call to Webtrition and POS sources) and **scheduling + validation** (where and when an item shows on smart labels and signage menu zones). Infrastructure, SQL tables, logic, APIs, security, service levels, UI representation and requirements for all three. |
 | **Source of truth** | This file: `MENU_PLATFORM_DESIGN.md` in the public repo [`ericmelgaard/menu-platform-spec`](https://github.com/ericmelgaard/menu-platform-spec). Any review page is a copy of it. Change this file first, add a row to the change log, then rebuild. |
@@ -43,7 +43,7 @@ questions from it directly.
 | What must the UI show? | §15 UI representation, requirements `R-UI-*` |
 | What is the testable list of requirements? | §16 Requirements (every one traces to a section) |
 | In what order do we build, and how do we know a phase is done? | §17 Build plan |
-| Why was a choice made? | §18 Decisions (`D1`–`D58`) |
+| Why was a choice made? | §18 Decisions (`D1`–`D59`) |
 | What is still undecided? | §19 Open items and proposed decisions |
 
 **Instructions for AI agents using this document**
@@ -220,12 +220,23 @@ stateDiagram-v2
 
 | Link state | Meaning |
 |---|---|
-| `planned` | Scheduled on a date Webtrition hasn't answered for yet: past the active template's end, or not fetched. Offered from the seeded cycle (the product's usual days and meal periods). Not a menu item yet. |
+| `planned` | Scheduled on a date with no Webtrition menu items yet. Either Webtrition **hasn't published** the date (past the active template's end date, or the next template isn't set up yet), or the date **hasn't been fetched** (freshness `unvalidated`). Not a menu item yet; it links by itself if the date's menu, when it arrives, includes it. |
 | `linked` | Matched by MRN + portion + meal period to that date's menu item, bound to its `menu_item_id` |
 | `missing` | Webtrition answered for the date and has no match |
 
 Each link also carries its freshness from §5.3 (`validated`, `stale`, `unvalidated`, `limited`), taken
 from when that date was last fetched.
+
+**No pretend menus (D59).** For a date Webtrition hasn't published, the system never offers a predicted
+menu. The seeded cycle belongs to the current template, and the next template may be completely
+different, so projecting it forward would suggest a menu that doesn't exist. Instead the UI says the date
+isn't published yet, the pick list falls back to product search, and each product's usual weekdays and
+meal periods (from `location_products`) are shown only as a hint.
+
+How a date counts as not published: Webtrition answers for the store and date with no menu data (wds
+returns no items, or its "no menu data" error). The ETL records the day as `not_published` in
+`source_menu_days` and re-checks it on the normal planning and validation schedule, so the date starts
+linking as soon as Webtrition publishes it.
 
 ### 4.4 How the link stays in place
 
@@ -252,8 +263,10 @@ from when that date was last fetched.
    is that response. The manager adds Chicken Tenders to the Grill label's lunch page for Tuesday. A
    placement is stored; its Dec 15 link is `linked` to that day's menu item. The fetched days are
    dropped from the cache once stale; the placement and link stay.
-   - If Webtrition hadn't published Dec 13–19 yet, the list would come from the seeded cycle and the
-     link would be `planned`.
+   - If Webtrition hadn't published Dec 13–19 yet (say they fall after the current template's end
+     date), the week would say so. There'd be no menu list; the manager would find Chicken Tenders in
+     product search (its usual days, Mon–Fri at lunch, shown as a hint), and the Dec 15 link would be
+     `planned` until Webtrition publishes that date.
 3. **Approach.** When the week of Dec 13 becomes next week, opening it re-fetches the dates and
    re-matches. The link updates if Webtrition changed the menu item id.
 4. **The day.** On Dec 15 here-and-now validation runs every 15 minutes. The link stays `linked` and
@@ -726,7 +739,8 @@ create table source_menu_days (              -- day-level validation cache
   service_date   date not null,
   fetched_at     timestamptz not null,
   payload_hash   text,
-  status         text not null check (status in ('ok','failed')),
+  status         text not null check (status in ('ok','not_published','failed')),
+                                            -- not_published: Webtrition has no menu for that date yet
   primary key (store_id, source_system, service_date)
 );
 
@@ -1128,8 +1142,10 @@ Runs at setup, and again whenever a new menu template becomes active (F1b). Not 
 3. **Webtrition target:** get the **validation response** for the week's dates from the ETL
    (`GET /source-menu`, `mode = cached` for planning or `fresh` when forced; uncached dates are pulled on
    demand, §5.1). This is the list of what can be scheduled, per date and meal period. Enrich it with
-   product values from the product database (one bulk lookup by MRN + portion). Dates with no response
-   are offered from the seeded cycle and marked `planned`.
+   product values from the product database (one bulk lookup by MRN + portion). Dates Webtrition hasn't
+   published get **no pick list**: they're marked "not published yet" and items can be added from product
+   search only, with links `planned` (D59). Dates not fetched yet (timeout, source down) fall back the
+   same way, marked `unvalidated`.
 4. **Retail target:** no source call. Category rules and the item list read the product database.
 5. Match placements per date and write `menu_item_links` (§4.4).
 6. Resolve each day and daypart (F6). Write `resolved_menus` for days in this week and next.
@@ -1180,8 +1196,9 @@ Runs at setup, and again whenever a new menu template becomes active (F1b). Not 
   (each portion is its own item). The placement stores the product and meal period; its link for that
   date is `linked` at once.
 - **Webtrition, from product search:** anything not on that day's response. Stored the same way; its
-  link is `missing` (or `planned` if the date has no response yet) and shown as "Not on the source menu
-  Tue".
+  link is `missing` and shown as "Not on the source menu Tue". On a date Webtrition hasn't published,
+  search is the only way to add items; the link is `planned` and each result shows the product's usual
+  weekdays and meal periods as a hint, never as a menu.
 - **Retail:** always a projection from the product database. POS items are mapped to projections, never
   placed directly.
 - **Custom quick add:** name check (unique `name_key` within the owner), chips from `catalog_terms`,
@@ -1565,7 +1582,8 @@ proposed; final wording and components follow the Operator Hub UI style guide (`
 |---|---|
 | `linked`, `validated` | Normal |
 | `missing` | "Not on the source menu" for that day; Auto items don't show on the label that day, forced On items show flagged |
-| `planned` | "Planned, not on a source menu yet" |
+| `planned` (date not published) | The day says "Webtrition hasn't published this date yet"; items show "Planned" |
+| `planned` (date not fetched) | "Not checked yet" (freshness `unvalidated`) |
 | `stale` | A quiet flag with the last check time ("Checked 42 min ago") |
 | `unvalidated` | "Not checked yet" |
 | `limited` | "Refresh available at 2:00 AM" (from `nextAllowedAt`) on a refresh attempt |
@@ -1577,6 +1595,8 @@ proposed; final wording and components follow the Operator Hub UI style guide (`
 - The pick list for a Webtrition target and date is that date's validation response, with WAND names
   and prices.
 - Search results show items that aren't on that day's menu as prominently as those that are, marked.
+- On a date Webtrition hasn't published, there is no pick list: the day says so, and search is offered
+  with each product's usual weekdays and meal periods as a hint. Never show a predicted menu.
 - Custom quick add runs the name check and offers ingredient, allergen and icon chips.
 
 ### 15.4 Freshness and sources
@@ -1656,6 +1676,7 @@ required for the phase named in §17.
 | R-SCH-1 | Webtrition scheduling works from the validation response | The pick list for a date equals that date's menu items for the meal period | §4.1, D32 |
 | R-SCH-2 | Placements never store a menu item id; links are per date | A placement links to a different id each day | §4.4, D33 |
 | R-SCH-3 | `planned` becomes `linked` automatically when the date is published | A future placement turns `linked` after the date is fetched, with no edit | §4.3 |
+| R-SCH-11 | No predicted menus for unpublished dates; those days are recorded `not_published` and re-checked | A date with no Webtrition menu returns no pick list and a `not_published` day row | §4.3, D59 |
 | R-SCH-4 | Placements for a date: own schedule, then recurring, then Default Week | The Thu–Mon example in §12.4 resolves per date | §4.7, F13 |
 | R-SCH-5 | Default Week edits apply at once to every week that follows it | Edit the Default Week; next week (no row) shows it immediately | F7, D15 |
 | R-SCH-6 | First edit of a following week creates its own schedule | The week gets a row and the Override marker | F7 |
@@ -1696,6 +1717,7 @@ required for the phase named in §17.
 | R-UI-2 | Item states and freshness shown per §15.2 | Each state can be produced and is visible | §15.2 |
 | R-UI-3 | Default Week edits and first edits explain their effect | Messages appear as in §15.1 | §15.1 |
 | R-UI-4 | Pick list from the validation response; search shows unavailable items as prominently | Matches §15.3 | §15.3 |
+| R-UI-8 | Dates Webtrition hasn't published show "not published yet", no pick list, search only | Open a week past the template's end date; no menu list appears | §4.3, §15.3, D59 |
 | R-UI-5 | Refresh now respects policy and shows `limited` | Matches §15.4 | §15.4 |
 | R-UI-6 | Past weeks are read only and shown as sent | Editing controls are absent on past days | §15.1 |
 | R-UI-7 | Retail mapping and device status screens per §15.5 | Matches §15.5 | §15.5 |
@@ -1786,6 +1808,7 @@ become `on_mask` / `off_mask`; MRNs become projections). `product_local_values`,
 | D56 | Errors, paging, rate limits and `If-Match` edit safety per §12.6 | 11-25 |
 | D57 | This document is shared as the build reference for people and AI agents; requirements in §16 trace to it | 11-25 |
 | D58 | The product database, ETL and scheduling are specified in one connected document (`MENU_PLATFORM_DESIGN.md` in `menu-platform-spec`) because they share identities, events and data | 11-25 |
+| D59 | No pretend menus: for dates Webtrition hasn't published, the UI says so and offers product search with usual days as a hint; the current cycle is never projected forward | 11-25 |
 
 ## 19. Open items and proposed decisions
 
@@ -1811,6 +1834,7 @@ build to the proposal until they're confirmed or changed.
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 2026-11-25 | Restructured as the reference for approval: infrastructure choices, full schema, flows F1–F11, APIs, build plan |
+| 2.3 | 2026-11-25 | Dates Webtrition hasn't published: no predicted menu, "not published yet", search only, `not_published` day status (§4.3, F5, F8, §15); R-SCH-11, R-UI-8; D59 |
 | 2.2 | 2026-11-25 | Moved to its own public repo, `ericmelgaard/menu-platform-spec`; build repos point to it; UI style guide reference names the Operator Hub repo |
 | 2.1 | 2026-11-25 | Renamed to Menu Platform Design (file `docs/MENU_PLATFORM_DESIGN.md`); scope names all three systems; goals per system (§1.1–1.3); product database scope boundary; system map and questions in "Using this document"; D58 |
 | 2.0 | 2026-11-25 | Shareable build reference: "Using this document" with agent instructions; §5.7 compute on change; §12.4 response format and ranges; §12.5 offline package; §12.6 errors, paging, rate limits, edit safety; §13 security and access; §14 service levels and monitoring; §15 UI representation; §16 numbered requirements; daypart hours, attribute profiles, offline and device tables; F14, F15; build phases 7–8; D45–D57; §19 proposed decisions |
