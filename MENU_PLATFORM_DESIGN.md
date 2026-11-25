@@ -6,7 +6,7 @@
 | **Version** | 2.3 · 2026-11-25 |
 | **Owner** | Eric Melgaard |
 | **Scope** | Three connected systems behind Operator Hub menus: the **product database** (what an item is), the **ETL server** (every call to Webtrition and POS sources) and **scheduling + validation** (where and when an item shows on smart labels and signage menu zones). Infrastructure, SQL tables, logic, APIs, security, service levels, UI representation and requirements for all three. |
-| **Source of truth** | This file: `MENU_PLATFORM_DESIGN.md` in the public repo [`ericmelgaard/menu-platform-spec`](https://github.com/ericmelgaard/menu-platform-spec). Any review page is a copy of it. Change this file first, add a row to the change log, then rebuild. |
+| **Source of truth** | This file: `MENU_PLATFORM_DESIGN.md` in the public repo [`ericmelgaard/menu-platform-spec`](https://github.com/ericmelgaard/menu-platform-spec). Rendered at https://ericmelgaard.github.io/menu-platform-spec/ (rebuilt on every push). Any rendered page is a copy of it. Change this file first, add a row to the change log, then rebuild. |
 | **Proposed — confirm** | Items marked this way are recommendations waiting for the owner's decision; they're listed in §19. Build to them unless §19 says otherwise. |
 
 ## Using this document

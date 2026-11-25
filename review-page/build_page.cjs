@@ -1,7 +1,12 @@
-// Render docs/MENU_PLATFORM_DESIGN.md to a review page. Usage: node build_page.cjs <md> <out.html>
+// Render MENU_PLATFORM_DESIGN.md to a review page.
+// Usage: node build_page.cjs <md> <out.html> [--standalone]
+//   default:      page content only (the Claude artifact viewer adds the document shell and renders diagrams)
+//   --standalone: a complete HTML document with diagram rendering, for GitHub Pages or opening locally
 const fs = require('fs');
 const MarkdownIt = require('markdown-it');
-const [, , mdPath, outPath] = process.argv;
+const args = process.argv.slice(2);
+const standalone = args.includes('--standalone');
+const [mdPath, outPath] = args.filter(a => !a.startsWith('--'));
 const src = fs.readFileSync(mdPath, 'utf8');
 
 const md = new MarkdownIt({ html: false, linkify: false, typographer: false });
@@ -43,5 +48,32 @@ const html = tpl
   .split('{{TITLE}}').join(md.utils.escapeHtml(title))
   .replace('{{TOC}}', tocHtml)
   .replace('{{BODY}}', body);
-fs.writeFileSync(outPath, html);
+const MERMAID = 'https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js';
+// The template's head part (title, fonts, styles) ends where the page wrapper starts.
+const split = html.indexOf('<div class="wrap">');
+const headPart = html.slice(0, split);
+const bodyPart = html.slice(split);
+const out = standalone
+  ? `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>*,*::before,*::after{box-sizing:border-box}body{margin:0}img{max-width:100%}</style>
+${headPart}</head>
+<body>
+${bodyPart}
+<script src="${MERMAID}"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'default',
+    securityLevel: 'strict'
+  });
+</script>
+</body>
+</html>
+`
+  : html;
+fs.writeFileSync(outPath, out);
 console.log('ok', toc.length, 'sections');

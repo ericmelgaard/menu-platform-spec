@@ -3,6 +3,9 @@
 The source of truth for the Operator Hub menu platform: the **product database**, the **ETL server**
 and **scheduling + validation**, specified together because they share identities, events and data.
 
+**Read it rendered:** https://ericmelgaard.github.io/menu-platform-spec/ (rebuilt from
+`MENU_PLATFORM_DESIGN.md` on every push to `main`).
+
 | File | What it is |
 |---|---|
 | [`MENU_PLATFORM_DESIGN.md`](MENU_PLATFORM_DESIGN.md) | The design: infrastructure, SQL tables, logic flows, APIs, security, service levels, UI representation, numbered requirements, build plan, decisions |
@@ -34,14 +37,20 @@ gh api repos/ericmelgaard/menu-platform-spec/contents/MENU_PLATFORM_DESIGN.md -H
 
 1. Edit `MENU_PLATFORM_DESIGN.md` first: bump the version, add a change log row, add or update
    decisions (`D…`) and requirements (`R-…`).
-2. Rebuild the review page (below) and republish it.
+2. Push to `main`: the GitHub Pages copy rebuilds itself. If you use the Claude review page, rebuild and republish it too.
 3. Then change code to match.
 
-## Review page
+## Rendered page
+
+Every push to `main` rebuilds the page and publishes it to GitHub Pages
+(`.github/workflows/pages.yml`): https://ericmelgaard.github.io/menu-platform-spec/
+
+To build it locally:
 
 ```sh
 npm install
-npm run build-page
+npm run build-site    # complete page with diagrams, open in a browser
+npm run build-page    # content only, for the Claude artifact viewer
 ```
 
-Writes `review-page/menu-platform-design.html` (not committed).
+Both write `review-page/menu-platform-design.html` (not committed).
