@@ -6,7 +6,7 @@
 | **Version** | 2.2 · 2026-11-25 |
 | **Owner** | Eric Melgaard |
 | **Scope** | Three connected systems behind Operator Hub menus: the **product database** (what an item is), the **ETL server** (every call to Webtrition and POS sources) and **scheduling + validation** (where and when an item shows on smart labels and signage menu zones). Infrastructure, SQL tables, logic, APIs, security, service levels, UI representation and requirements for all three. |
-| **Source of truth** | This file: `MENU_PLATFORM_DESIGN.md` in the private repo [`ericmelgaard/menu-platform-spec`](https://github.com/ericmelgaard/menu-platform-spec). Any review page is a copy of it. Change this file first, add a row to the change log, then rebuild. |
+| **Source of truth** | This file: `MENU_PLATFORM_DESIGN.md` in the public repo [`ericmelgaard/menu-platform-spec`](https://github.com/ericmelgaard/menu-platform-spec). Any review page is a copy of it. Change this file first, add a row to the change log, then rebuild. |
 | **Proposed — confirm** | Items marked this way are recommendations waiting for the owner's decision; they're listed in §19. Build to them unless §19 says otherwise. |
 
 ## Using this document
@@ -1811,7 +1811,7 @@ build to the proposal until they're confirmed or changed.
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 2026-11-25 | Restructured as the reference for approval: infrastructure choices, full schema, flows F1–F11, APIs, build plan |
-| 2.2 | 2026-11-25 | Moved to its own private repo, `ericmelgaard/menu-platform-spec`; build repos point to it; UI style guide reference names the Operator Hub repo |
+| 2.2 | 2026-11-25 | Moved to its own public repo, `ericmelgaard/menu-platform-spec`; build repos point to it; UI style guide reference names the Operator Hub repo |
 | 2.1 | 2026-11-25 | Renamed to Menu Platform Design (file `docs/MENU_PLATFORM_DESIGN.md`); scope names all three systems; goals per system (§1.1–1.3); product database scope boundary; system map and questions in "Using this document"; D58 |
 | 2.0 | 2026-11-25 | Shareable build reference: "Using this document" with agent instructions; §5.7 compute on change; §12.4 response format and ranges; §12.5 offline package; §12.6 errors, paging, rate limits, edit safety; §13 security and access; §14 service levels and monitoring; §15 UI representation; §16 numbered requirements; daypart hours, attribute profiles, offline and device tables; F14, F15; build phases 7–8; D45–D57; §19 proposed decisions |
 | 1.5 | 2026-11-25 | Default Week by reference (§4.7, F5, F7, F13); recurring end date; §10.4 scale as an enterprise service; D42–D44 |
