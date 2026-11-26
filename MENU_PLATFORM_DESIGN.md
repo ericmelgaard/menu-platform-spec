@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | **Proposed — awaiting approval.** No build work starts until this is approved. |
-| **Version** | 2.3 · 2026-11-25 |
+| **Version** | 2.4 · 2026-11-25 |
 | **Owner** | Eric Melgaard |
 | **Scope** | Three connected systems behind Operator Hub menus: the **product database** (what an item is), the **ETL server** (every call to Webtrition and POS sources) and **scheduling + validation** (where and when an item shows on smart labels and signage menu zones). Infrastructure, SQL tables, logic, APIs, security, service levels, UI representation and requirements for all three. |
 | **Source of truth** | This file: `MENU_PLATFORM_DESIGN.md` in the public repo [`ericmelgaard/menu-platform-spec`](https://github.com/ericmelgaard/menu-platform-spec). Rendered at https://ericmelgaard.github.io/menu-platform-spec/ (rebuilt on every push). Any rendered page is a copy of it. Change this file first, add a row to the change log, then rebuild. |
@@ -13,7 +13,7 @@
 
 This document is the single, connected reference for three systems that only work together: the
 **product database**, the **ETL server** and **scheduling + validation**. They share identities
-(products, MRN + portion, POS item ids), events and data, so they're specified in one place: a change to
+(products and their variants, MRN, POS item ids), events and data, so they're specified in one place: a change to
 one is checked against the other two here. It covers the infrastructure, the SQL tables, the logic, the
 APIs and what the UI must show, and it's written so that people and AI coding agents can answer build
 questions from it directly.
@@ -202,8 +202,9 @@ anything else, shown as not on that day's menu.
 
 | Kind | What it is | Stored where |
 |---|---|---|
-| **Menu item** | Webtrition's item for one date, meal period and station (`menu_item_id`) | ETL day cache, short-lived (§10) |
-| **Placement** | "This product, at this meal period, on this target's daypart page, on these days" | `menu_week_items`; never holds a menu item id |
+| **Menu item** | Webtrition's item for one date, daypart (meal period) and station (`menu_item_id`) | ETL day cache, short-lived (§10) |
+| **Variant** | A recipe (MRN) served at one station in one daypart; its own name, portion, price and overrides, inheriting the rest from the recipe | `product_variants`, kept with the product |
+| **Placement** | "This variant (recipe + station + daypart), on this target's daypart page, on these days" | `menu_week_items`; never holds a menu item id |
 | **Menu item link** | A placement matched to a menu item on one date, with its state | `menu_item_links`, one row per placement per date |
 
 ### 4.3 States of a placement on a date
@@ -213,7 +214,7 @@ stateDiagram-v2
   [*] --> planned: scheduled on a date with no response yet
   planned --> linked: date's menu items arrive and match
   planned --> missing: date's menu items arrive, no match
-  linked --> missing: item removed, or portion / meal period changed
+  linked --> missing: item removed, or moved to another station / daypart
   missing --> linked: item comes back
   linked --> linked: re-validated (new menu_item_id if Webtrition changed it)
 ```
@@ -221,7 +222,7 @@ stateDiagram-v2
 | Link state | Meaning |
 |---|---|
 | `planned` | Scheduled on a date with no Webtrition menu items yet. Either Webtrition **hasn't published** the date (past the active template's end date, or the next template isn't set up yet), or the date **hasn't been fetched** (freshness `unvalidated`). Not a menu item yet; it links by itself if the date's menu, when it arrives, includes it. |
-| `linked` | Matched by MRN + portion + meal period to that date's menu item, bound to its `menu_item_id` |
+| `linked` | Matched by the variant (MRN + station + daypart) to that date's menu item, bound to its `menu_item_id`. A portion change on the day doesn't break the link; it updates the variant's values |
 | `missing` | Webtrition answered for the date and has no match |
 
 Each link also carries its freshness from §5.3 (`validated`, `stale`, `unvalidated`, `limited`), taken
@@ -240,7 +241,7 @@ linking as soon as Webtrition publishes it.
 
 ### 4.4 How the link stays in place
 
-- A placement holds the product (which carries MRN + portion) and the meal period. It never holds a
+- A placement holds the **variant**: the recipe (MRN) at one station in one daypart. It never holds a
   menu item id, because those are per date.
 - Every time a date's menu items are fetched (opening the week, a forced refresh, here-and-now
   validation, the date entering this week or next), each placement on that date is matched again and
@@ -249,18 +250,22 @@ linking as soon as Webtrition publishes it.
 - One placement links to a different `menu_item_id` on each day of the week.
 - The Default Week is **followed by reference**: weeks that follow it hold no copies. Copying a week and
   recurring copy **placements** (new ids), never links. Links are always made for the actual dates.
-- If Webtrition replaces the item (a different portion is a different item), that date becomes
-  `missing`. A person picks the replacement, which is a new placement.
+- If Webtrition moves the recipe to another station or daypart, that date becomes `missing` (a
+  different station + daypart is a different menu item). The link records a `moved_to` hint (the
+  variant it now appears as) so the UI can offer the swap in one click; it never relinks by itself.
+- A different portion for the same recipe, station and daypart is the **same** item: the link stays
+  `linked` and the day's portion shows.
 - On the day, an Auto placement that's `missing` doesn't show (it follows the source); one forced On
   still shows, flagged.
 
 ### 4.5 Example: Chicken Tenders, three weeks out
 
-1. **Seed.** The cycle seed made a projection for MRN 13404, portion "1 each". The store's product set
-   knows it's usually served at lunch, Monday to Friday.
+1. **Seed.** The cycle seed made a projection for MRN 13404 (the recipe) with a variant for Grill +
+   Lunch (portion "1 each"). The store's product set knows that variant is usually served Monday to Friday.
 2. **Plan.** On Nov 25 a manager opens the week of Dec 13. Nothing is cached, so the scheduler asks the
    ETL for Dec 13–19 (an on-demand pull, §5.1). Webtrition has published those dates, so the lunch list
-   is that response. The manager adds Chicken Tenders to the Grill label's lunch page for Tuesday. A
+   is that response. The manager adds Chicken Tenders to the Grill label's lunch page for Tuesday; the
+   Grill + Lunch variant is chosen for them because that's the page's daypart and the only Grill offering. A
    placement is stored; its Dec 15 link is `linked` to that day's menu item. The fetched days are
    dropped from the cache once stale; the placement and link stay.
    - If Webtrition hadn't published Dec 13–19 yet (say they fall after the current template's end
@@ -285,13 +290,13 @@ custom item.
 | Row | Table | Holds | Size |
 |---|---|---|---|
 | The week | `menu_weeks` | target, `week_start = 2026-12-13`, origin (Default Week / copy / recurring), `edited` | ~150 B |
-| Chicken Tenders placement | `menu_week_items` | product id (company projection for MRN 13404, portion "1 each"), meal period Lunch, station Grill, `on_mask` / `off_mask` (Auto = follow Webtrition), sort keys, any this-week override | ~300 B |
+| Chicken Tenders placement | `menu_week_items` | product id (company projection for MRN 13404), variant Grill + Lunch, `on_mask` / `off_mask` (Auto = follow Webtrition), sort keys, any this-week override | ~300 B |
 | Chicken Tenders, Tue Dec 15 | `menu_item_links` | `linked`, menu item id for that date, when the date was fetched | ~80 B |
 | Soup of the Day placement | `menu_week_items` | product id (company custom projection), no meal period, days Mon–Fri forced On | ~300 B |
 | Soup of the Day links | none | Custom and retail items have no source dates, so no links; always available | 0 |
 
 - **Values at read time.** Chicken Tenders gets its name and price from that day's Webtrition menu item
-  (validation response), then the company and store values from the product database, then any
+  (validation response), then the Grill + Lunch variant's values, then the recipe's company and store values from the product database, then any
   this-week override. Soup of the Day gets everything from the product database. A retail item works the
   same way, with its POS price harvested per the POS sync policy.
 - **Default Week** placements are stored once under the target's Default Week row, with day masks and
@@ -499,15 +504,23 @@ almost all "no change"); stored rows keep answering when a source is down.
 | Thing | Identity | Lives in |
 |---|---|---|
 | Webtrition menu item (one day) | Webtrition `id`, unique per date × meal period × station | Validation cache only |
-| Webtrition item across days | **Fingerprint** `(mrn, portion, meal_period)` | Placements; matched per date into `menu_item_links` |
-| Webtrition projection | `(company, mrn, portion)` | Product database |
+| Webtrition recipe (projection) | `(company, mrn)` | Product database (`products`) |
+| Webtrition variant | `(product, station, daypart)`: the recipe at one meal station in one daypart (Webtrition meal period); station and daypart always go together | Product database (`product_variants`); placements point to it |
+| Webtrition item across days | The variant: `(mrn, station, daypart)` | Placements; matched per date into `menu_item_links` |
 | POS item | `(source_system, external_id)`; ids are **global across a concept** | Staging catalog, concept maps, links |
 | Retail projection | `product_id`, owned by the concept | Product database |
 
-- **Station is not part of the match.** People add an item from the right station. Station is saved for
-  sorting and as a tie-break, never checked.
-- **A different portion is a different item.** Edits apply to the same MRN + portion only.
-- An MRN is a master recipe. A Webtrition menu item can differ from its recipe (name, price, portion).
+- **The recipe is the product; station + daypart make the variant.** An MRN is a master recipe and is
+  one product. Each meal station + daypart it is served at is a variant (station A + Lunch, station A +
+  Dinner and station B + Lunch are three variants). Station and daypart are always joined: neither
+  exists without the other.
+- **Portion is not identity.** A different portion is the same recipe; portion is a value on the variant
+  (taken from the day's menu item), and can differ by variant.
+- **Variants inherit from the recipe and can override it.** Station A + Lunch can have a different name
+  than station B + Lunch. An edit made on the recipe applies to every variant that doesn't override that
+  attribute; an edit made on a variant applies only there.
+- **Every Webtrition placement names a variant.** That is what tells scheduling which menu item it
+  stands for (D60–D62).
 
 ## 7. Data model: product database
 
@@ -552,14 +565,14 @@ create table products (
   kind         text not null check (kind in ('webtrition','retail','custom')),
   owner_level  text not null check (owner_level in ('concept','company')),
   owner_id     uuid not null,               -- concept for retail, company for webtrition / custom
-  mrn          text, portion text,          -- webtrition only; portion '' when none
+  mrn          text,                        -- webtrition only: the master recipe
   name_key     text not null,               -- normalized name, for the name check
   status       text not null default 'active' check (status in ('active','inactive','retired')),
   first_seen   date, last_seen date,
   created_by   text not null,               -- 'etl', 'seed', or a user id
   check ((kind = 'retail') = (owner_level = 'concept'))
 );
-create unique index on products (owner_id, mrn, portion) where kind = 'webtrition';
+create unique index on products (owner_id, mrn)          where kind = 'webtrition';
 create unique index on products (owner_id, name_key)     where kind <> 'webtrition';
 
 create table source_attribute_maps (         -- one map per source type
@@ -576,7 +589,7 @@ create table product_links (
   priority           int  not null,         -- 1 = primary; API links use store_sources.priority when set
   target             text not null check (target in ('api','product')),
   source_system      int,
-  external_id        text,                  -- POS item id, or 'mrn|portion' for Webtrition
+  external_id        text,                  -- POS item id, or the MRN for Webtrition
   linked_product_id  uuid references products,  -- target 'product'
   scope_level        text check (scope_level in ('concept','company','store')),
   scope_id           uuid,
@@ -593,14 +606,29 @@ create table product_source_values (         -- harvested by the ETL, already ma
   harvested_at  timestamptz not null
 );
 
-create table product_values (                -- local overrides per level
-  product_id  uuid references products,
-  level       text check (level in ('concept','company','store')),
-  level_id    uuid,
-  values      jsonb not null,               -- any attribute, incl. translations {"fr-CA": {...}}
-  updated_by  uuid,
-  primary key (product_id, level, level_id)
+create table product_variants (              -- a recipe at one station in one daypart (§6)
+  id              uuid primary key,
+  product_id      uuid not null references products on delete cascade,
+  station_id      int  not null,            -- Webtrition meal station
+  meal_period_id  int  not null,            -- Webtrition meal period = the daypart; always with station
+  source_values   jsonb not null default '{}',  -- last seen menu item values: name, portion, price
+  detail          jsonb,                    -- nutrition / allergens only when they differ from the recipe's
+  detail_hash     text,
+  status          text not null default 'active' check (status in ('active','inactive')),
+  first_seen      date, last_seen date,
+  unique (product_id, station_id, meal_period_id)
 );
+
+create table product_values (                -- local overrides per level, on the recipe or one variant
+  id          uuid primary key,
+  product_id  uuid not null references products,
+  variant_id  uuid references product_variants,  -- null = the recipe (all variants)
+  level       text not null check (level in ('concept','company','store')),
+  level_id    uuid not null,
+  values      jsonb not null,               -- any attribute, incl. translations {"fr-CA": {...}}
+  updated_by  uuid
+);
+create unique index on product_values (product_id, coalesce(variant_id, '00000000-0000-0000-0000-000000000000'), level, level_id);
 ```
 
 ### 7.3 Location products
@@ -617,7 +645,21 @@ create table location_products (             -- each store's resolved product se
   resolved_at     timestamptz not null,
   primary key (store_id, product_id)
 );
+
+create table location_product_variants (     -- each store's resolved variants; the recipe row above + variant differences
+  store_id        uuid references stores,
+  variant_id      uuid references product_variants,
+  product_id      uuid not null,
+  values          jsonb not null,           -- only attributes that differ from the store's recipe values
+  available_days  smallint,                 -- seen pattern for this station + daypart in the current cycle
+  version         bigint not null,
+  primary key (store_id, variant_id)
+);
+create index on location_product_variants (store_id, product_id);
 ```
+
+A product card shows the recipe with its variants (station + daypart). Viewing or editing is done on
+the recipe (all variants) or on one variant; the card says which (§15.6).
 
 ### 7.4 Sources, catalogs and mapping
 
@@ -751,20 +793,21 @@ create table source_menu_items (             -- one dated Webtrition menu item; 
   menu_item_id        int  not null,        -- unique per date / meal period / station
   menu_collection_id  int,                  -- template it came from (F1b)
   meal_period_id      int, station_id int,
-  mrn                 text, portion text,
+  mrn                 text, portion text,  -- portion is a value, not identity
+  variant_id          uuid,                 -- product_variants row for mrn + station + meal period
   source_sort         int,
   name                text, price text,     -- the menu item's own values for that day
   detail_hash         text,                 -- hash of nutrition / allergens / ingredients / icons
   primary key (store_id, source_system, service_date, menu_item_id),
   foreign key (store_id, source_system, service_date) references source_menu_days on delete cascade
 ) partition by range (service_date);
-create index on source_menu_items (store_id, service_date, mrn, portion, meal_period_id);
+create index on source_menu_items (store_id, service_date, mrn, station_id, meal_period_id);
 ```
 
 Detail (nutrition, allergens, ingredients, icons) is **not** stored on dated rows. It is stored once per
 product in `product_source_values` (§7.2). When a day's `detail_hash` differs from the product's, the
-ETL updates the product's harvested detail (F2). A menu item whose detail differs from its recipe still
-has one detail per MRN + portion per day, which is what the hash catches.
+ETL updates the product's harvested detail (F2). A menu item whose detail differs from its recipe (for example a
+larger portion at one station) stores that detail on its variant, which is what the hash catches.
 
 ```sql
 create table source_cycles (                 -- Webtrition menu cycle per store
@@ -841,7 +884,7 @@ create table menu_autofill_rules (
   week_id         uuid not null references menu_weeks on delete cascade,
   daypart_id      uuid not null references dayparts,
   kind            text not null check (kind in ('source','category')),
-  station_id      int, meal_period_id int,  -- 'source': from the Webtrition week
+  station_id      int, meal_period_id int,  -- 'source': from the Webtrition week; sets the variant
   category_id     uuid,                     -- 'category': retail menus, signage zones
   max_items       int,                      -- or the zone's reported capacity
   sort            int
@@ -851,9 +894,11 @@ create table menu_week_items (
   id                      uuid primary key,
   week_id                 uuid not null references menu_weeks on delete cascade,
   daypart_id              uuid not null references dayparts,
-  product_id              uuid not null,     -- always a projection
-  meal_period_id          int,               -- Webtrition: with the product's MRN + portion = fingerprint
-  station_id              int,               -- where it was added from; not matched
+  product_id              uuid not null,     -- always a projection (the recipe for Webtrition)
+  variant_id              uuid,              -- Webtrition: required; recipe + station + daypart = what is matched
+  variant_choice          text check (variant_choice in ('user','inferred','review')),
+                                             -- user: picked; inferred: chosen by logic (§11 F8);
+                                             -- review: chosen by autofill among several, needs a look
   follows_meal_period_id  int,
   state                   text not null default 'shown' check (state in ('shown','hidden')),
   on_mask                 smallint not null default 0,   -- days forced On (bit 0 = Sunday)
@@ -871,7 +916,8 @@ create table menu_item_links (               -- a placement matched to one date'
   service_date    date not null,
   link_state      text not null check (link_state in ('planned','linked','missing')),
   menu_item_id    int,                       -- set when linked
-  station_id      int,                       -- station of the matched menu item
+  portion         text,                      -- that day's portion (values, not identity)
+  moved_to_variant_id uuid,                  -- missing, but the recipe appears as this variant that day
   source_fetched_at timestamptz,             -- when that date was fetched (freshness)
   matched_at      timestamptz not null,
   primary key (week_item_id, service_date)
@@ -997,7 +1043,7 @@ links (which menu item a placement matched) and in what endpoints were sent.
 ### 10.2 Volume per store (estimate)
 
 Assumptions, to be checked in phase 2: a large Webtrition store with about 650 menu items a day (630–690
-measured), about 1,500 products (MRN + portion) per cycle, 50 targets, 4 dayparts with about 15 items a
+measured), about 1,500 recipes (MRN) per cycle with about 2,500 variants (station + daypart), 50 targets, 4 dayparts with about 15 items a
 page, and 10 weeks of schedules (8 back, this week, next week).
 
 | Table | Rows | Size (with indexes) |
@@ -1056,9 +1102,10 @@ Runs at setup, and again whenever a new menu template becomes active (F1b). Not 
 1. Read menu templates / `cyclemenus` for the active template's cycle length (usually 28 days), range
    and next play date. Save to `source_cycles`.
 2. Pull that many days from wds (4 calls of 7 days, `allergenMenu: "all"`).
-3. For each distinct MRN + portion, call `upsert-from-source`: find or create the **company**
-   projection, link it at the store's priority, save the mapped values.
-4. Record meal periods, stations and days seen. Rebuild `location_products`.
+3. For each distinct MRN, call `upsert-from-source`: find or create the **company** projection
+   (the recipe), link it at the store's priority, save the mapped values. For each distinct MRN +
+   station + meal period, find or create its **variant** and save the menu item's name, portion and price.
+4. Record days seen per variant. Rebuild `location_products`.
 5. Keep this week and next as the validation cache. Set `seeded_at`.
 
 ### F1b · Detect a new menu template
@@ -1081,8 +1128,8 @@ Runs at setup, and again whenever a new menu template becomes active (F1b). Not 
    the same store and days is reused.
 4. Compare the payload hash with `source_menu_days`:
    - **same:** update `fetched_at` only (now `validated`);
-   - **different:** replace the day's items, upsert any new MRN + portion as a projection, update the
-     product's harvested detail when `detail_hash` differs (this is how projections stay current after
+   - **different:** replace the day's items, upsert any new MRN as a projection and any new station +
+     daypart as a variant, update the variant's values (portion, name, price) and the product's harvested detail when `detail_hash` differs (this is how projections stay current after
      the seed), rebuild `location_products`, emit `menu.source_changed {store, dates}`. An unknown
      `menuCollectionId` triggers F1b.
    - either way, re-match the placements on those dates and write their `menu_item_links` (§4.4).
@@ -1142,7 +1189,7 @@ Runs at setup, and again whenever a new menu template becomes active (F1b). Not 
 3. **Webtrition target:** get the **validation response** for the week's dates from the ETL
    (`GET /source-menu`, `mode = cached` for planning or `fresh` when forced; uncached dates are pulled on
    demand, §5.1). This is the list of what can be scheduled, per date and meal period. Enrich it with
-   product values from the product database (one bulk lookup by MRN + portion). Dates Webtrition hasn't
+   product values from the product database (one bulk lookup by variant). Dates Webtrition hasn't
    published get **no pick list**: they're marked "not published yet" and items can be added from product
    search only, with links `planned` (D59). Dates not fetched yet (timeout, source down) fall back the
    same way, marked `unvalidated`.
@@ -1160,17 +1207,19 @@ Runs at setup, and again whenever a new menu template becomes active (F1b). Not 
    its link is `linked` (Auto follows the source). `off_mask` hides it. A `missing` placement forced On
    still shows, flagged. Closed days (store `openDays`) show nothing and aren't flagged.
 3. **Link and validate** (Webtrition): read the placement's `menu_item_links` row for the date (written
-   in F5 / F2). Several matches on the day: prefer the placement's own station, then the sort standard.
+   in F5 / F2). A link needs the same MRN, station and daypart; if the recipe appears twice there (two
+   portions), prefer the portion last seen on the variant, then the sort standard.
    Freshness comes from the day's `fetched_at` and the policy (§5.3).
 4. **Values** per attribute, first that has one wins:
    1. this week's `overrides`;
-   2. local overrides: store → company → concept (`product_values`);
-   3. linked sources in priority order: the lowest-numbered link whose attribute map includes the
-      attribute, skipping sources not active at the store. For Webtrition the day's menu item values
-      (name, price) beat the harvested values. Example: Webtrition at priority 1 maps name, nutrition
+   2. local overrides: store → company → concept (`product_values`); at each level the variant's
+      override beats the recipe's;
+   3. the variant's source values (the day's menu item, or last seen: name, portion, price);
+   4. linked sources in priority order: the lowest-numbered link whose attribute map includes the
+      attribute, skipping sources not active at the store. Example: Webtrition at priority 1 maps name, nutrition
       and allergens but not price; Agilysys at priority 2 maps price and out_of_stock; so price comes
       from Agilysys and allergens from Webtrition;
-   4. otherwise empty.
+   5. otherwise empty.
 5. **Order:** if the day has a lock (F10), follow it. Otherwise pinned `position`, then source
    `sortOrder`, then Webtrition menu item id (category fill: category order, then name). Items with no
    source sort after source items.
@@ -1192,11 +1241,19 @@ Runs at setup, and again whenever a new menu template becomes active (F1b). Not 
 
 ### F8 · Add an item
 
-- **Webtrition, from the day's list:** pick from the validation response for that date and meal period
-  (each portion is its own item). The placement stores the product and meal period; its link for that
-  date is `linked` at once.
+- **Every Webtrition placement needs a variant (station + daypart).** Logic chooses it whenever it can,
+  so people rarely have to:
+  1. Adding on a daypart page: the page's daypart is preselected. If the recipe has one station in that
+     daypart, the variant is chosen (`variant_choice = 'inferred'`). Several stations: the person picks
+     (`user`). It can always be changed.
+  2. Adding an item from another daypart: the variant must still be picked; nothing is assumed.
+  3. Autofill: the rule's station is known, and if that station serves one daypart the variant is known
+     (`inferred`). If several autofill rules on the label offer the same recipe, autofill takes the
+     first rule in order and marks it `review`; the label shows that action is needed.
+- **Webtrition, from the day's list:** pick from the validation response for that date and daypart.
+  Each list row is a variant, so the choice is already made. Its link for that date is `linked` at once.
 - **Webtrition, from product search:** anything not on that day's response. Stored the same way; its
-  link is `missing` and shown as "Not on the source menu Tue". On a date Webtrition hasn't published,
+  link is `missing` and shown as "Not on the source menu Tue". The variant is chosen as above. On a date Webtrition hasn't published,
   search is the only way to add items; the link is `planned` and each result shows the product's usual
   weekdays and meal periods as a hint, never as a menu.
 - **Retail:** always a projection from the product database. POS items are mapped to projections, never
@@ -1207,8 +1264,9 @@ Runs at setup, and again whenever a new menu template becomes active (F1b). Not 
 
 ### F9 · A product changes
 
-1. The product database saves an override at the editor's level and clears the same attribute at every
-   level below it (higher levels win; stores have no say). Or the ETL harvests a new source value.
+1. The product database saves an override at the editor's level, on the recipe or one variant, and
+   clears the same attribute at every level below it (higher levels win; stores have no say). A recipe
+   edit also applies to every variant that doesn't override that attribute. Or the ETL harvests a new source value.
 2. Rebuild `location_products` for the affected stores. Emit
    `product.changed {product_id, store_ids, attributes, level}`.
 3. Scheduling: for a higher-level edit, clear the same attributes from week overrides from this week
@@ -1293,8 +1351,9 @@ policy's limits). Changed values flow through F9.
 |---|---|---|
 | `GET /stores/{id}/products?q&day&mealPeriod&category` | Scheduling, UI | Search `location_products`; unavailable items listed as prominently as available ones |
 | `GET /stores/{id}/products/{productId}` | Scheduling, devices | One resolved product |
-| `POST /products/upsert-from-source` | ETL | Find or create the projection for a source item; link it; save harvested values |
-| `POST /stores/{id}/products/lookup {keys}` | Scheduling | Bulk enrichment of a validation response by MRN + portion (or product id) |
+| `POST /products/upsert-from-source` | ETL | Find or create the projection (recipe) and variant for a source item; link it; save harvested values |
+| `POST /stores/{id}/products/lookup {keys}` | Scheduling | Bulk enrichment of a validation response by variant (MRN + station + daypart) or product id |
+| `GET /products/{id}/variants` · `PATCH /products/{id}/variants/{variantId}/values?level=` | UI | A recipe's variants; overrides on one variant |
 | `POST /products` · `PATCH /products/{id}/values?level=` | UI | Custom items, overrides at a level |
 | `POST /products/{id}/links` · `DELETE /products/{id}/links/{linkId}` | UI, ETL | Link, relink, change priority |
 | `POST /products/{id}/refresh` | UI, admin | Update one projection from its sources now (F9b) |
@@ -1323,7 +1382,7 @@ policy's limits). Changed values flow through F9.
 |---|---|---|
 | `GET /targets/{id}/weeks/{weekStart}` | UI, API | F5: open (create if needed), resolve, return |
 | `GET /targets/{id}/default-week` · `PATCH …` | UI | Default Week and its edits (F7) |
-| `POST/PATCH/DELETE /targets/{id}/weeks/{weekStart}/items` | UI | Add, change, hide, pin items |
+| `POST/PATCH/DELETE /targets/{id}/weeks/{weekStart}/items` | UI | Add, change, hide, pin items; Webtrition items carry `variantId` (or station + daypart); omitted, it is inferred per F8 or refused with `422 variant_required` listing the choices |
 | `POST /targets/{id}/weeks/{weekStart}/copy` · `/recur` | UI | Copy, paste, recurring |
 | `GET /targets/{id}/available?date&daypart` | UI | What can be scheduled: the date's validation response, enriched (Webtrition), or products (retail); each with link state |
 | `GET /targets/{id}/links?from&to` | UI, support | Menu item links per placement and date |
@@ -1588,6 +1647,8 @@ proposed; final wording and components follow the Operator Hub UI style guide (`
 | `unvalidated` | "Not checked yet" |
 | `limited` | "Refresh available at 2:00 AM" (from `nextAllowedAt`) on a refresh attempt |
 | Custom and retail items | No source flags |
+| Variant chosen by autofill among several (`review`) | "Choose station" action on the item and a count on the label: action needed |
+| `missing` with `moved_to` | "Now at Deli · Lunch" with a one-click swap |
 | Day strip | Outline on days the source offers the item (linked days); fill on days it's used |
 
 ### 15.3 Adding items and search
@@ -1598,6 +1659,8 @@ proposed; final wording and components follow the Operator Hub UI style guide (`
 - On a date Webtrition hasn't published, there is no pick list: the day says so, and search is offered
   with each product's usual weekdays and meal periods as a hint. Never show a predicted menu.
 - Custom quick add runs the name check and offers ingredient, allergen and icon chips.
+- Adding a Webtrition item asks for station + daypart only when logic can't choose (F8); the page's
+  daypart is preselected and changeable.
 
 ### 15.4 Freshness and sources
 
@@ -1610,6 +1673,12 @@ proposed; final wording and components follow the Operator Hub UI style guide (`
   allows it.
 - Per store: which POS is active and its priority.
 - Device status: online menu hash or offline package version, last seen.
+
+### 15.6 Product cards: recipe and variants
+
+- A Webtrition product card shows the recipe and its variants (station + daypart, with portion).
+- Viewing and editing say which: the recipe (applies to every variant without its own value) or one
+  variant. A variant shows which values it overrides.
 
 ## 16. Requirements
 
@@ -1653,7 +1722,7 @@ required for the phase named in §17.
 | R-ETL-4 | Forced refresh respects the policy | A forced PAR pull after the daily one returns `limited` with `nextAllowedAt` | F2b, D25 |
 | R-ETL-5 | Source outages keep the last data, marked `stale` | Block the source; menus still return, flagged | §5.3, D26 |
 | R-ETL-6 | Change detection by hash; only changes trigger re-resolving | An unchanged pull writes only `fetched_at` | §5.4 |
-| R-ETL-7 | Every new Webtrition MRN + portion becomes a company projection | A new item appears in `location_products` after the pull that saw it | D9 |
+| R-ETL-7 | Every new Webtrition MRN becomes a company projection; every new station + daypart for it becomes a variant | A new recipe appears in `location_products`, and a new station for it as a variant, after the pull that saw it | D9, D60 |
 | R-ETL-8 | POS items wait in the staging catalog unless mapped or auto-imported | A new unmapped POS item creates no product | F3, D20 |
 | R-ETL-9 | `allergenMenu: "all"` on every wds call | Retail Allergen menus return items | §5.1, F1 |
 
@@ -1668,6 +1737,7 @@ required for the phase named in §17.
 | R-PD-5 | Webtrition projections go inactive after two cycles unseen; retail never | An unseen item is hidden from quick add after two cycles | F2b, D16 |
 | R-PD-6 | Name check before creating by hand | A duplicate custom name is refused | §7.2 |
 | R-PD-7 | On-demand refresh of one projection | "Update" pulls the recipe and changes values | F9b, D31 |
+| R-PD-8 | Variants inherit recipe values and can override them per level | A Grill + Lunch name override doesn't change Deli + Lunch; a recipe edit changes both where not overridden | §6, F6, D61 |
 
 ### 16.5 Scheduling (`R-SCH`)
 
@@ -1682,7 +1752,8 @@ required for the phase named in §17.
 | R-SCH-6 | First edit of a following week creates its own schedule | The week gets a row and the Override marker | F7 |
 | R-SCH-7 | Recurring weeks copy on first access and can end | An occurrence after the end date follows the Default Week | §4.7, D43 |
 | R-SCH-8 | Order freezes once a day is shown | A new item added after the first send goes to the end | F10, D3 |
-| R-SCH-9 | Match by MRN + portion + meal period; station ignored | An item at a different station still links | D1 |
+| R-SCH-9 | Match by variant: MRN + station + daypart; portion ignored | A portion change keeps the link; a move to another station turns it `missing` with `moved_to` | D60, D61 |
+| R-SCH-12 | Every Webtrition placement has a variant; logic infers it when it can; autofill among several marks `review` | Adding on a lunch page with one Grill variant needs no choice; two autofill stations give a `review` item | F8, D62 |
 | R-SCH-10 | Past days are read from what was shown | Rename a product; last Tuesday still shows the old name | D40 |
 
 ### 16.6 APIs and devices (`R-API`)
@@ -1717,6 +1788,7 @@ required for the phase named in §17.
 | R-UI-2 | Item states and freshness shown per §15.2 | Each state can be produced and is visible | §15.2 |
 | R-UI-3 | Default Week edits and first edits explain their effect | Messages appear as in §15.1 | §15.1 |
 | R-UI-4 | Pick list from the validation response; search shows unavailable items as prominently | Matches §15.3 | §15.3 |
+| R-UI-9 | Product cards show recipe and variants; edits say whether they apply to the recipe or one variant | Matches §15.6 | §15.6 |
 | R-UI-8 | Dates Webtrition hasn't published show "not published yet", no pick list, search only | Open a week past the template's end date; no menu list appears | §4.3, §15.3, D59 |
 | R-UI-5 | Refresh now respects policy and shows `limited` | Matches §15.4 | §15.4 |
 | R-UI-6 | Past weeks are read only and shown as sent | Editing controls are absent on past days | §15.1 |
@@ -1748,8 +1820,8 @@ become `on_mask` / `off_mask`; MRNs become projections). `product_local_values`,
 
 | ID | Decision | Date |
 |---|---|---|
-| D1 | Webtrition items are matched by MRN + portion + meal period for the date; station isn't checked | 11-24 |
-| D2 | A different portion is a different item; edits apply to the same MRN and portion | 11-24 |
+| D1 | ~~Matched by MRN + portion + meal period; station not checked~~ Superseded by D60 | 11-24 |
+| D2 | ~~A different portion is a different item~~ Superseded by D60 | 11-24 |
 | D3 | Order freezes once a day is shown; new items go to the end unless they're the only item that could show | 11-24 |
 | D4 | Values inherit down; a higher-level edit wins and clears lower levels; stores have no say | 11-24 |
 | D5 | Brand managers edit at the concept or above; the company edits Webtrition and custom products | 11-24 |
@@ -1809,6 +1881,9 @@ become `on_mask` / `off_mask`; MRNs become projections). `product_local_values`,
 | D57 | This document is shared as the build reference for people and AI agents; requirements in §16 trace to it | 11-25 |
 | D58 | The product database, ETL and scheduling are specified in one connected document (`MENU_PLATFORM_DESIGN.md` in `menu-platform-spec`) because they share identities, events and data | 11-25 |
 | D59 | No pretend menus: for dates Webtrition hasn't published, the UI says so and offers product search with usual days as a hint; the current cycle is never projected forward | 11-25 |
+| D60 | A Webtrition product is the recipe (MRN); portion is not identity. Each station + daypart the recipe is served at is a variant; station and daypart are always joined. Matching is by MRN + station + daypart | 11-25 |
+| D61 | Variants inherit the recipe's values and can override them at each level; a recipe edit applies to every variant that doesn't override that attribute | 11-25 |
+| D62 | Every Webtrition placement names a variant. Logic picks it when it can (page daypart, single station, autofill rule); autofill choosing among several marks it for review | 11-25 |
 
 ## 19. Open items and proposed decisions
 
@@ -1828,12 +1903,14 @@ build to the proposal until they're confirmed or changed.
 | P9 | Offline package horizon | 8 weeks of exceptions | F14 |
 | P10 | Wait before an uncached request falls back | ~5 s | F2b |
 | P11 | Each source's real limits for its first policy | Confirm PAR's daily sync time and other POS rates in phase 2 | §5.2 |
+| P12 | The same recipe twice at one station and daypart on one day (two portions) | Treat as one variant; the link prefers the portion last seen, then sort order. Check how often it happens in phase 2 data | F6, D60 |
 
 ## Change log
 
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 2026-11-25 | Restructured as the reference for approval: infrastructure choices, full schema, flows F1–F11, APIs, build plan |
+| 2.4 | 2026-11-25 | Portion no longer makes an item unique: a Webtrition product is the recipe (MRN) and each station + daypart is a variant (`product_variants`) that inherits and can override the recipe. Matching is by MRN + station + daypart. Placements name a variant, chosen by logic where possible (F8, `variant_choice`); `moved_to` hint; recipe/variant product cards (§15.6). D1–D2 superseded; D60–D62; R-PD-8, R-SCH-12, R-UI-9 |
 | 2.3 | 2026-11-25 | Dates Webtrition hasn't published: no predicted menu, "not published yet", search only, `not_published` day status (§4.3, F5, F8, §15); R-SCH-11, R-UI-8; D59 |
 | 2.2 | 2026-11-25 | Moved to its own public repo, `ericmelgaard/menu-platform-spec`; build repos point to it; UI style guide reference names the Operator Hub repo |
 | 2.1 | 2026-11-25 | Renamed to Menu Platform Design (file `docs/MENU_PLATFORM_DESIGN.md`); scope names all three systems; goals per system (§1.1–1.3); product database scope boundary; system map and questions in "Using this document"; D58 |
