@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | **Proposed — awaiting approval.** No build work starts until this is approved. |
-| **Version** | 2.4 · 2026-11-25 |
+| **Version** | 2.5 · 2026-11-25 |
 | **Owner** | Eric Melgaard |
 | **Scope** | Three connected systems behind Operator Hub menus: the **product database** (what an item is), the **ETL server** (every call to Webtrition and POS sources) and **scheduling + validation** (where and when an item shows on smart labels and signage menu zones). Infrastructure, SQL tables, logic, APIs, security, service levels, UI representation and requirements for all three. |
 | **Source of truth** | This file: `MENU_PLATFORM_DESIGN.md` in the public repo [`ericmelgaard/menu-platform-spec`](https://github.com/ericmelgaard/menu-platform-spec). Rendered at https://ericmelgaard.github.io/menu-platform-spec/ (rebuilt on every push). Any rendered page is a copy of it. Change this file first, add a row to the change log, then rebuild. |
@@ -253,8 +253,11 @@ linking as soon as Webtrition publishes it.
 - If Webtrition moves the recipe to another station or daypart, that date becomes `missing` (a
   different station + daypart is a different menu item). The link records a `moved_to` hint (the
   variant it now appears as) so the UI can offer the swap in one click; it never relinks by itself.
-- A different portion for the same recipe, station and daypart is the **same** item: the link stays
-  `linked` and the day's portion shows.
+- A portion change for the same recipe, station and daypart keeps the link: the link stays `linked`
+  and the day's portion shows.
+- When the recipe is offered in **two portions** at the same station and daypart, the portion is part
+  of the choice: the placement records the portion it was added with and links only to that portion
+  (D63).
 - On the day, an Auto placement that's `missing` doesn't show (it follows the source); one forced On
   still shows, flagged.
 
@@ -515,7 +518,8 @@ almost all "no change"); stored rows keep answering when a source is down.
   Dinner and station B + Lunch are three variants). Station and daypart are always joined: neither
   exists without the other.
 - **Portion is not identity.** A different portion is the same recipe; portion is a value on the variant
-  (taken from the day's menu item), and can differ by variant.
+  (taken from the day's menu item), and can differ by variant. Only when one station and daypart offer
+  the recipe in more than one portion does the placement also record which portion it means (D63).
 - **Variants inherit from the recipe and can override it.** Station A + Lunch can have a different name
   than station B + Lunch. An edit made on the recipe applies to every variant that doesn't override that
   attribute; an edit made on a variant applies only there.
@@ -612,6 +616,7 @@ create table product_variants (              -- a recipe at one station in one d
   station_id      int  not null,            -- Webtrition meal station
   meal_period_id  int  not null,            -- Webtrition meal period = the daypart; always with station
   source_values   jsonb not null default '{}',  -- last seen menu item values: name, portion, price
+  portions        text[] not null default '{}', -- portions seen here; more than one = portion must be chosen
   detail          jsonb,                    -- nutrition / allergens only when they differ from the recipe's
   detail_hash     text,
   status          text not null default 'active' check (status in ('active','inactive')),
@@ -899,6 +904,7 @@ create table menu_week_items (
   variant_choice          text check (variant_choice in ('user','inferred','review')),
                                              -- user: picked; inferred: chosen by logic (§11 F8);
                                              -- review: chosen by autofill among several, needs a look
+  portion                 text,              -- set when the variant offers more than one portion (D63)
   follows_meal_period_id  int,
   state                   text not null default 'shown' check (state in ('shown','hidden')),
   on_mask                 smallint not null default 0,   -- days forced On (bit 0 = Sunday)
@@ -909,6 +915,10 @@ create table menu_week_items (
   origin_item_id          uuid
 );
 create index on menu_week_items (week_id, daypart_id);
+create unique index on menu_week_items (week_id, daypart_id, variant_id, coalesce(portion, ''))
+  where variant_id is not null;              -- no duplicates on a label (D63)
+create unique index on menu_week_items (week_id, daypart_id, product_id)
+  where variant_id is null;                  -- custom and retail: once per daypart page
 create index on menu_week_items (product_id);
 
 create table menu_item_links (               -- a placement matched to one date's menu item (§4)
@@ -1207,8 +1217,10 @@ Runs at setup, and again whenever a new menu template becomes active (F1b). Not 
    its link is `linked` (Auto follows the source). `off_mask` hides it. A `missing` placement forced On
    still shows, flagged. Closed days (store `openDays`) show nothing and aren't flagged.
 3. **Link and validate** (Webtrition): read the placement's `menu_item_links` row for the date (written
-   in F5 / F2). A link needs the same MRN, station and daypart; if the recipe appears twice there (two
-   portions), prefer the portion last seen on the variant, then the sort standard.
+   in F5 / F2). A link needs the same MRN, station and daypart, and the placement's portion when it has
+   one. A duplicate of the same portion on one day is one item. Two portions and a placement with no
+   portion (made before the second portion appeared): the link is `missing` and the item is marked
+   `review` ("Choose portion").
    Freshness comes from the day's `fetched_at` and the policy (§5.3).
 4. **Values** per attribute, first that has one wins:
    1. this week's `overrides`;
@@ -1250,6 +1262,11 @@ Runs at setup, and again whenever a new menu template becomes active (F1b). Not 
   3. Autofill: the rule's station is known, and if that station serves one daypart the variant is known
      (`inferred`). If several autofill rules on the label offer the same recipe, autofill takes the
      first rule in order and marks it `review`; the label shows that action is needed.
+  4. Portion: if the variant offers more than one portion that day, the portion is always a forced
+     choice. Choosing a portion can also settle the station: if that portion is only served at one
+     station in the daypart, the variant is chosen with it (`inferred`).
+  5. No duplicates: the same variant and portion (or the same custom or retail product) can be on a
+     daypart page only once; adding it again is refused and the existing item is shown.
 - **Webtrition, from the day's list:** pick from the validation response for that date and daypart.
   Each list row is a variant, so the choice is already made. Its link for that date is `linked` at once.
 - **Webtrition, from product search:** anything not on that day's response. Stored the same way; its
@@ -1382,7 +1399,7 @@ policy's limits). Changed values flow through F9.
 |---|---|---|
 | `GET /targets/{id}/weeks/{weekStart}` | UI, API | F5: open (create if needed), resolve, return |
 | `GET /targets/{id}/default-week` · `PATCH …` | UI | Default Week and its edits (F7) |
-| `POST/PATCH/DELETE /targets/{id}/weeks/{weekStart}/items` | UI | Add, change, hide, pin items; Webtrition items carry `variantId` (or station + daypart); omitted, it is inferred per F8 or refused with `422 variant_required` listing the choices |
+| `POST/PATCH/DELETE /targets/{id}/weeks/{weekStart}/items` | UI | Add, change, hide, pin items; Webtrition items carry `variantId` (or station + daypart); omitted, it is inferred per F8 or refused with `422 variant_required` / `portion_required` listing the choices; a duplicate returns `409 duplicate_item` |
 | `POST /targets/{id}/weeks/{weekStart}/copy` · `/recur` | UI | Copy, paste, recurring |
 | `GET /targets/{id}/available?date&daypart` | UI | What can be scheduled: the date's validation response, enriched (Webtrition), or products (retail); each with link state |
 | `GET /targets/{id}/links?from&to` | UI, support | Menu item links per placement and date |
@@ -1647,7 +1664,7 @@ proposed; final wording and components follow the Operator Hub UI style guide (`
 | `unvalidated` | "Not checked yet" |
 | `limited` | "Refresh available at 2:00 AM" (from `nextAllowedAt`) on a refresh attempt |
 | Custom and retail items | No source flags |
-| Variant chosen by autofill among several (`review`) | "Choose station" action on the item and a count on the label: action needed |
+| Variant chosen by autofill among several, or a portion now needed (`review`) | "Choose station" / "Choose portion" action on the item and a count on the label: action needed |
 | `missing` with `moved_to` | "Now at Deli · Lunch" with a one-click swap |
 | Day strip | Outline on days the source offers the item (linked days); fill on days it's used |
 
@@ -1753,6 +1770,7 @@ required for the phase named in §17.
 | R-SCH-7 | Recurring weeks copy on first access and can end | An occurrence after the end date follows the Default Week | §4.7, D43 |
 | R-SCH-8 | Order freezes once a day is shown | A new item added after the first send goes to the end | F10, D3 |
 | R-SCH-9 | Match by variant: MRN + station + daypart; portion ignored | A portion change keeps the link; a move to another station turns it `missing` with `moved_to` | D60, D61 |
+| R-SCH-13 | Two portions at one station and daypart force a portion choice; no duplicate variant + portion (or product) on a daypart page | Adding the second soup portion asks for the portion; adding the same one twice returns `409` | F8, D63 |
 | R-SCH-12 | Every Webtrition placement has a variant; logic infers it when it can; autofill among several marks `review` | Adding on a lunch page with one Grill variant needs no choice; two autofill stations give a `review` item | F8, D62 |
 | R-SCH-10 | Past days are read from what was shown | Rename a product; last Tuesday still shows the old name | D40 |
 
@@ -1884,6 +1902,7 @@ become `on_mask` / `off_mask`; MRNs become projections). `product_local_values`,
 | D60 | A Webtrition product is the recipe (MRN); portion is not identity. Each station + daypart the recipe is served at is a variant; station and daypart are always joined. Matching is by MRN + station + daypart | 11-25 |
 | D61 | Variants inherit the recipe's values and can override them at each level; a recipe edit applies to every variant that doesn't override that attribute | 11-25 |
 | D62 | Every Webtrition placement names a variant. Logic picks it when it can (page daypart, single station, autofill rule); autofill choosing among several marks it for review | 11-25 |
+| D63 | Two portions of a recipe at one station and daypart: the portion is a forced choice, recorded on the placement and part of its match; a chosen portion can settle the station. The same item can't be on a daypart page twice | 11-25 |
 
 ## 19. Open items and proposed decisions
 
@@ -1903,13 +1922,13 @@ build to the proposal until they're confirmed or changed.
 | P9 | Offline package horizon | 8 weeks of exceptions | F14 |
 | P10 | Wait before an uncached request falls back | ~5 s | F2b |
 | P11 | Each source's real limits for its first policy | Confirm PAR's daily sync time and other POS rates in phase 2 | §5.2 |
-| P12 | The same recipe twice at one station and daypart on one day (two portions) | Treat as one variant; the link prefers the portion last seen, then sort order. Check how often it happens in phase 2 data | F6, D60 |
 
 ## Change log
 
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 2026-11-25 | Restructured as the reference for approval: infrastructure choices, full schema, flows F1–F11, APIs, build plan |
+| 2.5 | 2026-11-25 | Open item P12 settled as D63: two portions at one station and daypart force a portion choice (placement `portion`, part of the match); a portion can settle the station; no duplicate items on a daypart page (unique indexes, `409`). R-SCH-13 |
 | 2.4 | 2026-11-25 | Portion no longer makes an item unique: a Webtrition product is the recipe (MRN) and each station + daypart is a variant (`product_variants`) that inherits and can override the recipe. Matching is by MRN + station + daypart. Placements name a variant, chosen by logic where possible (F8, `variant_choice`); `moved_to` hint; recipe/variant product cards (§15.6). D1–D2 superseded; D60–D62; R-PD-8, R-SCH-12, R-UI-9 |
 | 2.3 | 2026-11-25 | Dates Webtrition hasn't published: no predicted menu, "not published yet", search only, `not_published` day status (§4.3, F5, F8, §15); R-SCH-11, R-UI-8; D59 |
 | 2.2 | 2026-11-25 | Moved to its own public repo, `ericmelgaard/menu-platform-spec`; build repos point to it; UI style guide reference names the Operator Hub repo |
